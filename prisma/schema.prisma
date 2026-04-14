@@ -1,9 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,4 +8,182 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  VIEWER
+  EDITOR
+  ADMIN
+}
+
+// ---------------------------------------------------------------------------
+// User
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  username     String   @unique
+  passwordHash String
+  role         Role     @default(VIEWER)
+  createdAt    DateTime @default(now())
+  // null = self-registered; set to admin id when created by an ADMIN
+  createdById  String?
+  updatedAt    DateTime @updatedAt
+  // null until first admin edit (role change / profile update)
+  updatedById  String?
+
+  // Self-referential audit relations (not enforced as FK on purpose — keep simple)
+  createdBy User? @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdUsers User[] @relation("UserCreatedBy")
+
+  updatedBy User? @relation("UserUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedUsers User[] @relation("UserUpdatedBy")
+
+  // Articles this user originally authored (immutable audit)
+  authoredArticles Article[] @relation("ArticleCreatedBy")
+
+  // Articles this user currently owns (edit-permission key)
+  ownedArticles Article[] @relation("ArticleEditor")
+
+  // Articles this user last edited
+  lastEditedArticles Article[] @relation("ArticleUpdatedBy")
+
+  // Revisions this user created
+  revisions Revision[]
+
+  // Tags this user created
+  createdTags Tag[] @relation("TagCreatedBy")
+
+  // Tags this user last renamed
+  updatedTags Tag[] @relation("TagUpdatedBy")
+
+  // ArticleTags assigned by this user
+  articleTags ArticleTag[]
+
+  // Sessions
+  sessions Session[]
+
+  @@map("User")
+}
+
+// ---------------------------------------------------------------------------
+// Article
+// ---------------------------------------------------------------------------
+
+model Article {
+  id            String   @id @default(cuid())
+  slug          String   @unique
+  title         String
+  content       String
+  // First 200 chars of content, stored for search result snippets
+  excerpt       String   @default("")
+  isPublished   Boolean  @default(true)
+  // tsvector column — managed by a DB trigger, not Prisma
+  searchVector  Unsupported("tsvector")?
+
+  createdAt     DateTime @default(now())
+  // The original author — immutable, never changed even on ownership transfer
+  createdById   String
+  // The current owner — drives edit-permission checks for EDITORs
+  editorId      String
+  updatedAt     DateTime @updatedAt
+  // The last user to change title / content / tags; null until first edit
+  updatedById   String?
+
+  createdBy   User  @relation("ArticleCreatedBy", fields: [createdById], references: [id])
+  editor      User  @relation("ArticleEditor",    fields: [editorId],    references: [id])
+  updatedBy   User? @relation("ArticleUpdatedBy", fields: [updatedById], references: [id])
+
+  revisions   Revision[]
+  tags        ArticleTag[]
+
+  @@map("Article")
+}
+
+// ---------------------------------------------------------------------------
+// Revision  (append-only — no updatedAt / updatedById)
+// ---------------------------------------------------------------------------
+
+model Revision {
+  id          String   @id @default(cuid())
+  articleId   String
+  // Snapshot of title at save time
+  title       String
+  // Full content snapshot
+  content     String
+  changeNote  String?
+  // Monotonically increasing per article; starts at 1
+  revisionNum Int
+
+  createdAt   DateTime @default(now())
+  createdById String
+
+  article     Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  createdBy   User    @relation(fields: [createdById], references: [id])
+
+  @@unique([articleId, revisionNum])
+  @@map("Revision")
+}
+
+// ---------------------------------------------------------------------------
+// Tag
+// ---------------------------------------------------------------------------
+
+model Tag {
+  id          String   @id @default(cuid())
+  // Always stored lowercase-normalised
+  name        String   @unique
+  createdAt   DateTime @default(now())
+  createdById String
+  updatedAt   DateTime @updatedAt
+  // Null until an ADMIN renames the tag
+  updatedById String?
+
+  createdBy   User  @relation("TagCreatedBy", fields: [createdById], references: [id])
+  updatedBy   User? @relation("TagUpdatedBy", fields: [updatedById], references: [id])
+
+  articles    ArticleTag[]
+
+  @@map("Tag")
+}
+
+// ---------------------------------------------------------------------------
+// ArticleTag  (join table — insert/delete only, no updates)
+// ---------------------------------------------------------------------------
+
+model ArticleTag {
+  articleId   String
+  tagId       String
+  createdAt   DateTime @default(now())
+  // The user who assigned this tag to the article
+  createdById String
+
+  article     Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  tag         Tag     @relation(fields: [tagId],     references: [id], onDelete: Cascade)
+  createdBy   User    @relation(fields: [createdById], references: [id])
+
+  @@id([articleId, tagId])
+  @@map("ArticleTag")
+}
+
+// ---------------------------------------------------------------------------
+// Session  (system-managed — only createdAt needed)
+// ---------------------------------------------------------------------------
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  // The bearer token stored in the HttpOnly cookie / Authorization header
+  token     String   @unique @default(cuid())
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("Session")
 }
